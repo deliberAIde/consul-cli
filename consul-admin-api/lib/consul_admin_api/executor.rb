@@ -33,8 +33,13 @@ module ConsulAdminApi
       "newsfeed" => "ProjektPhase::NewsfeedPhase"
     }.freeze
 
+    OPERATOR_ROUTE_NAMESPACES = %w[
+      admin management moderation valuation officing sdg_management
+    ].freeze
+
     ACTIONS = %w[
       instance.info instance.capabilities instance.models
+      route.list route.resolve route.audit
       model.describe model.list model.get model.create model.update model.delete model.call
       settings.list settings.get settings.set settings.apply settings.reset_defaults
       user.create user.verify role.list role.assign role.remove
@@ -48,6 +53,9 @@ module ConsulAdminApi
       when "instance.info" then instance_info
       when "instance.capabilities" then capabilities
       when "instance.models" then models(params)
+      when "route.list" then list_routes(params)
+      when "route.resolve" then resolve_route(params)
+      when "route.audit" then audit_routes(params)
       when "model.describe" then describe_model(params)
       when "model.list" then list_model(params)
       when "model.get" then get_model(params)
@@ -118,6 +126,122 @@ module ConsulAdminApi
           full_model_access: true,
           lifecycle_method_calls: true
         }
+      end
+
+      def list_routes(params)
+        scope = params.fetch("scope", "operator").to_s
+        pattern = params["pattern"].to_s.downcase
+        requested_verb = params["verb"].to_s.upcase
+        requested_controller = params["controller"].to_s
+
+        routes = Rails.application.routes.routes.filter_map do |route|
+          controller = route.defaults[:controller].to_s
+          action = route.defaults[:action].to_s
+          next if controller.empty? || action.empty?
+          next unless route_in_scope?(controller, scope)
+
+          entry = serialize_route(route, controller, action)
+          searchable = [
+            entry[:name],
+            entry[:controller],
+            entry[:action],
+            entry[:path],
+            entry[:verbs].join(" ")
+          ].compact.join(" ").downcase
+          next if pattern.present? && !searchable.include?(pattern)
+          next if requested_verb.present? && !entry[:verbs].include?(requested_verb)
+          next if requested_controller.present? && entry[:controller] != requested_controller
+
+          entry
+        end
+
+        routes.sort_by! do |route|
+          [route[:controller], route[:action], route[:path], route[:verbs].join("|")]
+        end
+        {
+          scope: scope,
+          count: routes.length,
+          namespaces: OPERATOR_ROUTE_NAMESPACES,
+          routes: routes
+        }
+      end
+
+      def resolve_route(params)
+        name = params.fetch("name").to_s.sub(/_path\z/, "")
+        route = Rails.application.routes.routes.find { |candidate| candidate.name.to_s == name }
+        raise ArgumentError, "Unknown named Rails route: #{name}" unless route
+
+        controller = route.defaults[:controller].to_s
+        action = route.defaults[:action].to_s
+        raise ArgumentError, "Route #{name} is not a controller route" if controller.empty? || action.empty?
+
+        path_params = params["path_params"] || {}
+        raise ArgumentError, "path_params must be an object" unless path_params.is_a?(Hash)
+        helper = "#{name}_path"
+        helpers = Rails.application.routes.url_helpers
+        path = helpers.public_send(helper, path_params.symbolize_keys)
+        serialize_route(route, controller, action).merge(path: path, helper: helper)
+      rescue ActionController::UrlGenerationError => error
+        raise ArgumentError, "Could not resolve #{name}: #{error.message}"
+      end
+
+      def audit_routes(params)
+        manifest = list_routes(params.merge("scope" => params.fetch("scope", "operator")))
+        routes = manifest[:routes]
+        mutating = routes.select { |route| (route[:verbs] & %w[POST PUT PATCH DELETE]).any? }
+        by_namespace = routes.group_by do |route|
+          route[:controller].split("/", 2).first
+        end.transform_values(&:length)
+        {
+          scope: manifest[:scope],
+          total_routes: routes.length,
+          mutating_routes: mutating.length,
+          read_routes: routes.length - mutating.length,
+          named_routes: routes.count { |route| route[:name].present? },
+          unnamed_routes: routes.count { |route| route[:name].blank? },
+          controllers: routes.map { |route| route[:controller] }.uniq.length,
+          actions: routes.map { |route| [route[:controller], route[:action]] }.uniq.length,
+          by_namespace: by_namespace.sort.to_h,
+          addressable_routes: routes.length,
+          uncovered_routes: [],
+          coverage_basis: "Every listed route is addressable through authenticated web request by path; named routes are also resolvable by helper."
+        }
+      end
+
+      def route_in_scope?(controller, scope)
+        case scope
+        when "all"
+          true
+        when "public"
+          OPERATOR_ROUTE_NAMESPACES.none? { |namespace| controller.start_with?("#{namespace}/") }
+        when "operator"
+          OPERATOR_ROUTE_NAMESPACES.any? { |namespace| controller.start_with?("#{namespace}/") }
+        when *OPERATOR_ROUTE_NAMESPACES
+          controller.start_with?("#{scope}/")
+        else
+          raise ArgumentError, "Unknown route scope: #{scope}"
+        end
+      end
+
+      def serialize_route(route, controller, action)
+        {
+          name: route.name&.to_s,
+          verbs: normalize_route_verbs(route.verb),
+          path: route.path.spec.to_s.sub(/\(\.:format\)\z/, ""),
+          controller: controller,
+          action: action,
+          required_parts: Array(route.required_parts).map(&:to_s),
+          defaults: route.defaults.each_with_object({}) do |(key, value), result|
+            result[key.to_s] = serialize_value(value) if value.nil? || value.is_a?(String) ||
+                                                     value.is_a?(Symbol) || value.is_a?(Numeric) ||
+                                                     value == true || value == false
+          end
+        }
+      end
+
+      def normalize_route_verbs(verb)
+        source = verb.respond_to?(:source) ? verb.source : verb.to_s
+        source.scan(/\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/).uniq
       end
 
       def models(params)

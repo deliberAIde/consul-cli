@@ -1,0 +1,10 @@
+services:
+  app:
+    ports: !override
+      - "${CONSUL_CLI_PORT:-3011}:3000"
+    volumes:
+      - ${CONSUL_ADMIN_API_HOST_PATH:-../consul-cli/consul-admin-api}:/var/www/consul-admin-api:ro
+    environment:
+      - CONSUL_ADMIN_API_PATH=/var/www/consul-admin-api
+      - CONSUL_ADMIN_API_TOKEN=$CONSUL_ADMIN_API_TOKEN
+      - CONSUL_ADMIN_API_DEBUG=true

@@ -21,6 +21,12 @@ class Profile:
     base_url: str
     token: str | None = None
     token_env: str = "CONSUL_ADMIN_API_TOKEN"
+    operator_login: str | None = None
+    operator_password: str | None = None
+    operator_password_env: str = "CONSUL_OPERATOR_PASSWORD"
+    operator_login_path: str = "/users/sign_in"
+    operator_probe_path: str = "/admin"
+    web_timeout: float = 300.0
     app_path: str | None = None
     container: str | None = None
     container_workdir: str = "/var/www/consul"
@@ -29,6 +35,10 @@ class Profile:
     @property
     def resolved_token(self) -> str | None:
         return os.environ.get(self.token_env) or self.token
+
+    @property
+    def resolved_operator_password(self) -> str | None:
+        return os.environ.get(self.operator_password_env) or self.operator_password
 
 
 def _load() -> dict[str, Any]:

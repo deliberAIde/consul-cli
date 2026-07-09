@@ -3,7 +3,7 @@ from setuptools import find_namespace_packages, setup
 
 setup(
     name="cli-anything-consul",
-    version="0.1.0",
+    version="0.2.0",
     description="Full operator CLI for CONSUL DEMOCRACY and compatible forks",
     packages=find_namespace_packages(include=["cli_anything.*"]),
     include_package_data=True,

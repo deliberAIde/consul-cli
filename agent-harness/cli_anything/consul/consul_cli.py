@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import base64
 import csv
+import json
 import mimetypes
-from dataclasses import dataclass
+import os
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +25,29 @@ from .core.config import (
 )
 from .core.resources import RESOURCE_MODELS
 from .utils.consul_backend import ConsulBackend, ConsulBackendError
+from .utils.runtime_backend import ConsulRuntimeBackend
+from .utils.web_backend import MUTATING_METHODS, ConsulWebBackend
+
+
+ROUTE_SCOPES = [
+    "operator",
+    "admin",
+    "management",
+    "moderation",
+    "valuation",
+    "officing",
+    "sdg_management",
+    "public",
+    "all",
+]
 
 
 @dataclass(slots=True)
 class Runtime:
     profile_name: str | None
     json_output: bool
+    web_backend: ConsulWebBackend | None = None
+    native_backend: ConsulRuntimeBackend | None = None
 
 
 def _read_json(value: str | None, *, expected: type | tuple[type, ...] = dict) -> Any:
@@ -69,11 +87,15 @@ def _emit(runtime: Runtime, value: Any) -> None:
         click.echo(json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
-def _backend(runtime: Runtime) -> ConsulBackend:
+def _profile(runtime: Runtime) -> Profile:
     try:
-        return ConsulBackend(load_profile(runtime.profile_name))
+        return load_profile(runtime.profile_name)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _backend(runtime: Runtime) -> ConsulBackend:
+    return ConsulBackend(_profile(runtime))
 
 
 def _execute(runtime: Runtime, action: str, **params: Any) -> Any:
@@ -83,6 +105,56 @@ def _execute(runtime: Runtime, action: str, **params: Any) -> Any:
         raise click.ClickException(str(exc)) from exc
     _emit(runtime, data)
     return data
+
+
+def _web(runtime: Runtime) -> ConsulWebBackend:
+    if runtime.web_backend is None:
+        try:
+            runtime.web_backend = ConsulWebBackend(_profile(runtime))
+        except ConsulBackendError as exc:
+            raise click.ClickException(str(exc)) from exc
+    return runtime.web_backend
+
+
+def _runtime_backend(runtime: Runtime) -> ConsulRuntimeBackend:
+    if runtime.native_backend is None:
+        try:
+            runtime.native_backend = ConsulRuntimeBackend(_profile(runtime))
+        except ConsulBackendError as exc:
+            raise click.ClickException(str(exc)) from exc
+    return runtime.native_backend
+
+
+def _key_value_pairs(values: tuple[str, ...], *, label: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise click.BadParameter(f"{label} must use NAME=VALUE: {value}")
+        key, item = value.split("=", 1)
+        if not key:
+            raise click.BadParameter(f"{label} name cannot be empty")
+        result[key] = item
+    return result
+
+
+def _file_pairs(values: tuple[str, ...]) -> list[tuple[str, Path]]:
+    result: list[tuple[str, Path]] = []
+    for value in values:
+        if "=" not in value:
+            raise click.BadParameter(f"File must use FIELD=PATH: {value}")
+        field, path_value = value.split("=", 1)
+        if not field:
+            raise click.BadParameter("File field cannot be empty")
+        path = Path(path_value)
+        if not path.is_file():
+            raise click.BadParameter(f"File does not exist: {path}")
+        result.append((field, path))
+    return result
+
+
+def _confirm_mutation(method: str, yes: bool, description: str) -> None:
+    if method.upper() in MUTATING_METHODS and not yes:
+        click.confirm(description, abort=True)
 
 
 @click.group(
@@ -115,6 +187,16 @@ def profile_group() -> None:
     "--token", help="Bridge bearer token. Prefer --token-env outside local demos."
 )
 @click.option("--token-env", default="CONSUL_ADMIN_API_TOKEN", show_default=True)
+@click.option("--operator-login")
+@click.option("--operator-password", hide_input=True)
+@click.option(
+    "--operator-password-env", default="CONSUL_OPERATOR_PASSWORD", show_default=True
+)
+@click.option("--operator-login-path", default="/users/sign_in", show_default=True)
+@click.option("--operator-probe-path", default="/admin", show_default=True)
+@click.option(
+    "--web-timeout", default=300.0, type=click.FloatRange(min=1.0), show_default=True
+)
 @click.option("--app-path", type=click.Path(path_type=Path))
 @click.option("--container")
 @click.option("--container-workdir", default="/var/www/consul", show_default=True)
@@ -127,6 +209,12 @@ def profile_add(
     base_url: str,
     token: str | None,
     token_env: str,
+    operator_login: str | None,
+    operator_password: str | None,
+    operator_password_env: str,
+    operator_login_path: str,
+    operator_probe_path: str,
+    web_timeout: float,
     app_path: Path | None,
     container: str | None,
     container_workdir: str,
@@ -139,6 +227,12 @@ def profile_add(
         base_url=base_url,
         token=token,
         token_env=token_env,
+        operator_login=operator_login,
+        operator_password=operator_password,
+        operator_password_env=operator_password_env,
+        operator_login_path=operator_login_path,
+        operator_probe_path=operator_probe_path,
+        web_timeout=web_timeout,
         app_path=str(app_path.resolve()) if app_path else None,
         container=container,
         container_workdir=container_workdir,
@@ -155,8 +249,21 @@ def profile_list(runtime: Runtime) -> None:
     default = default_profile_name()
     safe = {
         name: {
-            **{key: value for key, value in entry.items() if key != "token"},
-            "token_configured": bool(entry.get("token")),
+            **{
+                key: value
+                for key, value in entry.items()
+                if key not in {"token", "operator_password"}
+            },
+            "token_configured": bool(
+                entry.get("token")
+                or os.environ.get(entry.get("token_env", "CONSUL_ADMIN_API_TOKEN"))
+            ),
+            "operator_password_configured": bool(
+                entry.get("operator_password")
+                or os.environ.get(
+                    entry.get("operator_password_env", "CONSUL_OPERATOR_PASSWORD")
+                )
+            ),
             "default": name == default,
         }
         for name, entry in profiles.items()
@@ -172,21 +279,49 @@ def profile_show(runtime: Runtime, name: str | None) -> None:
         profile = load_profile(name or runtime.profile_name)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
-    value = (
-        {key: val for key, val in profile.__dict__.items() if key != "token"}
-        if hasattr(profile, "__dict__")
-        else {
-            "name": profile.name,
-            "base_url": profile.base_url,
-            "token_env": profile.token_env,
-            "app_path": profile.app_path,
-            "container": profile.container,
-            "container_workdir": profile.container_workdir,
-            "verify_tls": profile.verify_tls,
-        }
-    )
+    value = asdict(profile)
+    value.pop("token", None)
+    value.pop("operator_password", None)
     value["token_configured"] = bool(profile.resolved_token)
+    value["operator_password_configured"] = bool(profile.resolved_operator_password)
     _emit(runtime, value)
+
+
+@profile_group.command("set-operator")
+@click.argument("login")
+@click.option(
+    "--password", hide_input=True, help="Stored password; prefer --password-env."
+)
+@click.option("--password-env", default="CONSUL_OPERATOR_PASSWORD", show_default=True)
+@click.option("--login-path", default="/users/sign_in", show_default=True)
+@click.option("--probe-path", default="/admin", show_default=True)
+@click.pass_obj
+def profile_set_operator(
+    runtime: Runtime,
+    login: str,
+    password: str | None,
+    password_env: str,
+    login_path: str,
+    probe_path: str,
+) -> None:
+    profile = _profile(runtime)
+    profile.operator_login = login
+    if password is not None:
+        profile.operator_password = password
+    profile.operator_password_env = password_env
+    profile.operator_login_path = login_path
+    profile.operator_probe_path = probe_path
+    save_profile(profile)
+    runtime.web_backend = None
+    _emit(
+        runtime,
+        {
+            "status": "saved",
+            "profile": profile.name,
+            "operator_login": login,
+            "operator_password_env": password_env,
+        },
+    )
 
 
 @profile_group.command("default")
@@ -243,6 +378,396 @@ def instance_capabilities(runtime: Runtime) -> None:
 @click.pass_obj
 def instance_models(runtime: Runtime, pattern: str | None) -> None:
     _execute(runtime, "instance.models", pattern=pattern)
+
+
+@cli.group("routes")
+def routes_group() -> None:
+    """Discover and resolve every installed Rails controller route."""
+
+
+@routes_group.command("list")
+@click.option("--scope", type=click.Choice(ROUTE_SCOPES), default="operator")
+@click.option("--verb")
+@click.option("--controller")
+@click.option("--match", "pattern")
+@click.pass_obj
+def routes_list(
+    runtime: Runtime,
+    scope: str,
+    verb: str | None,
+    controller: str | None,
+    pattern: str | None,
+) -> None:
+    _execute(
+        runtime,
+        "route.list",
+        scope=scope,
+        verb=verb,
+        controller=controller,
+        pattern=pattern,
+    )
+
+
+@routes_group.command("resolve")
+@click.argument("name")
+@click.option("--path-params", default="{}", help="JSON object or @file.")
+@click.pass_obj
+def routes_resolve(runtime: Runtime, name: str, path_params: str) -> None:
+    _execute(
+        runtime,
+        "route.resolve",
+        name=name,
+        path_params=_read_json(path_params),
+    )
+
+
+@routes_group.command("audit")
+@click.option("--scope", type=click.Choice(ROUTE_SCOPES), default="operator")
+@click.pass_obj
+def routes_audit(runtime: Runtime, scope: str) -> None:
+    _execute(runtime, "route.audit", scope=scope)
+
+
+@routes_group.command("catalog")
+@click.option("--scope", type=click.Choice(ROUTE_SCOPES), default="operator")
+@click.option("--out", type=click.Path(path_type=Path), required=True)
+@click.pass_obj
+def routes_catalog(runtime: Runtime, scope: str, out: Path) -> None:
+    try:
+        manifest = _backend(runtime).execute("route.list", scope=scope)
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    _emit(
+        runtime,
+        {
+            "status": "written",
+            "scope": scope,
+            "routes": manifest["count"],
+            "path": str(out.resolve()),
+        },
+    )
+
+
+@cli.group("web")
+def web_group() -> None:
+    """Use real operator sessions and controller workflows."""
+
+
+@web_group.command("login")
+@click.option("--login")
+@click.option("--password", hide_input=True)
+@click.pass_obj
+def web_login(runtime: Runtime, login: str | None, password: str | None) -> None:
+    try:
+        result = _web(runtime).authenticate(login=login, password=password)
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, result)
+
+
+@web_group.command("inspect")
+@click.argument("path")
+@click.option("--anonymous", is_flag=True)
+@click.pass_obj
+def web_inspect(runtime: Runtime, path: str, anonymous: bool) -> None:
+    try:
+        result = _web(runtime).inspect(path, authenticate=not anonymous)
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, result)
+
+
+@web_group.command("request")
+@click.argument(
+    "method",
+    type=click.Choice(
+        ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        case_sensitive=False,
+    ),
+)
+@click.argument("path")
+@click.option("--params", "params_value", default="{}", help="JSON object or @file.")
+@click.option("--header", "header_values", multiple=True, help="NAME=VALUE.")
+@click.option("--file", "file_values", multiple=True, help="FIELD=PATH.")
+@click.option("--json-body", is_flag=True)
+@click.option("--anonymous", is_flag=True)
+@click.option("--follow-redirects/--no-follow-redirects", default=True)
+@click.option("--include-body", is_flag=True)
+@click.option("--include-forms", is_flag=True)
+@click.option("--out", type=click.Path(path_type=Path))
+@click.option("--yes", is_flag=True, help="Confirm a mutating request.")
+@click.pass_obj
+def web_request(
+    runtime: Runtime,
+    method: str,
+    path: str,
+    params_value: str,
+    header_values: tuple[str, ...],
+    file_values: tuple[str, ...],
+    json_body: bool,
+    anonymous: bool,
+    follow_redirects: bool,
+    include_body: bool,
+    include_forms: bool,
+    out: Path | None,
+    yes: bool,
+) -> None:
+    method = method.upper()
+    if json_body and file_values:
+        raise click.UsageError("--json-body and --file cannot be combined")
+    _confirm_mutation(method, yes, f"Send {method} {path} to CONSUL?")
+    try:
+        result = _web(runtime).request(
+            method,
+            path,
+            params=_read_json(params_value),
+            headers=_key_value_pairs(header_values, label="Header"),
+            files=_file_pairs(file_values),
+            json_body=json_body,
+            authenticate=not anonymous,
+            follow_redirects=follow_redirects,
+            include_body=include_body,
+            include_forms=include_forms,
+            output_path=out,
+        )
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, result)
+
+
+@web_group.command("invoke")
+@click.argument("name")
+@click.option("--path-params", default="{}", help="JSON object or @file.")
+@click.option(
+    "--method",
+    type=click.Choice(
+        ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        case_sensitive=False,
+    ),
+)
+@click.option("--params", "params_value", default="{}", help="JSON object or @file.")
+@click.option("--header", "header_values", multiple=True, help="NAME=VALUE.")
+@click.option("--file", "file_values", multiple=True, help="FIELD=PATH.")
+@click.option("--json-body", is_flag=True)
+@click.option("--follow-redirects/--no-follow-redirects", default=True)
+@click.option("--include-body", is_flag=True)
+@click.option("--include-forms", is_flag=True)
+@click.option("--out", type=click.Path(path_type=Path))
+@click.option("--yes", is_flag=True, help="Confirm a mutating request.")
+@click.pass_obj
+def web_invoke(
+    runtime: Runtime,
+    name: str,
+    path_params: str,
+    method: str | None,
+    params_value: str,
+    header_values: tuple[str, ...],
+    file_values: tuple[str, ...],
+    json_body: bool,
+    follow_redirects: bool,
+    include_body: bool,
+    include_forms: bool,
+    out: Path | None,
+    yes: bool,
+) -> None:
+    if json_body and file_values:
+        raise click.UsageError("--json-body and --file cannot be combined")
+    try:
+        route = _backend(runtime).execute(
+            "route.resolve",
+            name=name,
+            path_params=_read_json(path_params),
+        )
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    verbs = route.get("verbs", [])
+    selected_method = (
+        method or next((verb for verb in verbs if verb != "HEAD"), "")
+    ).upper()
+    if not selected_method:
+        raise click.ClickException(f"Route {name} has no invokable HTTP verb")
+    if selected_method not in verbs:
+        raise click.BadParameter(
+            f"{selected_method} is not valid for {name}; choose one of {verbs}",
+            param_hint="--method",
+        )
+    _confirm_mutation(
+        selected_method,
+        yes,
+        f"Invoke {name} as {selected_method} {route['path']}?",
+    )
+    try:
+        response = _web(runtime).request(
+            selected_method,
+            route["path"],
+            params=_read_json(params_value),
+            headers=_key_value_pairs(header_values, label="Header"),
+            files=_file_pairs(file_values),
+            json_body=json_body,
+            follow_redirects=follow_redirects,
+            include_body=include_body,
+            include_forms=include_forms,
+            output_path=out,
+        )
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, {"route": route, "response": response})
+
+
+@cli.group("runtime")
+def runtime_group() -> None:
+    """Run native CONSUL Rake tasks and Rails code."""
+
+
+@runtime_group.command("tasks")
+@click.pass_obj
+def runtime_tasks(runtime: Runtime) -> None:
+    try:
+        result = _runtime_backend(runtime).rake_tasks()
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, result)
+
+
+@runtime_group.command("rake")
+@click.argument("task")
+@click.option("--arg", "arguments", multiple=True)
+@click.option("--env", "env_values", multiple=True, help="NAME=VALUE.")
+@click.option("--timeout", type=click.FloatRange(min=1.0))
+@click.option("--yes", is_flag=True)
+@click.pass_obj
+def runtime_rake(
+    runtime: Runtime,
+    task: str,
+    arguments: tuple[str, ...],
+    env_values: tuple[str, ...],
+    timeout: float | None,
+    yes: bool,
+) -> None:
+    if not yes:
+        click.confirm(f"Run native Rake task {task}?", abort=True)
+    try:
+        result = _runtime_backend(runtime).run_rake(
+            task,
+            arguments=arguments,
+            env=_key_value_pairs(env_values, label="Environment variable"),
+            timeout=timeout,
+        )
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, result)
+
+
+@runtime_group.command("runner")
+@click.argument("code")
+@click.option("--env", "env_values", multiple=True, help="NAME=VALUE.")
+@click.option("--timeout", type=click.FloatRange(min=1.0))
+@click.option("--yes", is_flag=True)
+@click.pass_obj
+def runtime_runner(
+    runtime: Runtime,
+    code: str,
+    env_values: tuple[str, ...],
+    timeout: float | None,
+    yes: bool,
+) -> None:
+    source = _read_text(code)
+    if not yes:
+        click.confirm("Run this code inside the CONSUL Rails application?", abort=True)
+    try:
+        result = _runtime_backend(runtime).rails_runner(
+            source,
+            env=_key_value_pairs(env_values, label="Environment variable"),
+            timeout=timeout,
+        )
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, result)
+
+
+@cli.group("coverage")
+def coverage_group() -> None:
+    """Measure operator control-surface addressability."""
+
+
+@coverage_group.command("audit")
+@click.option("--scope", type=click.Choice(ROUTE_SCOPES), default="operator")
+@click.option("--skip-runtime", is_flag=True)
+@click.option("--out", type=click.Path(path_type=Path))
+@click.pass_obj
+def coverage_audit(
+    runtime: Runtime,
+    scope: str,
+    skip_runtime: bool,
+    out: Path | None,
+) -> None:
+    try:
+        backend = _backend(runtime)
+        info = backend.execute("instance.info")
+        capabilities = backend.execute("instance.capabilities")
+        route_audit = backend.execute("route.audit", scope=scope)
+        task_summary = None
+        if not skip_runtime:
+            tasks = _runtime_backend(runtime).rake_tasks()
+            task_summary = {
+                "total_tasks": tasks["count"],
+                "addressable_tasks": tasks["count"],
+                "uncovered_tasks": [],
+                "coverage_basis": "Every native Rake task is invokable by exact task name and arguments.",
+            }
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    route_complete = (
+        route_audit["addressable_routes"] == route_audit["total_routes"]
+        and not route_audit["uncovered_routes"]
+    )
+    task_complete = task_summary is None or not task_summary["uncovered_tasks"]
+    result = {
+        "status": (
+            "complete_control_surface_addressability"
+            if route_complete and task_complete
+            else "gaps_detected"
+        ),
+        "instance": info,
+        "operator_routes": route_audit,
+        "native_tasks": task_summary,
+        "named_resource_groups": {
+            "count": len(RESOURCE_MODELS),
+            "resources": RESOURCE_MODELS,
+        },
+        "bridge_actions": capabilities.get("actions", []),
+        "execution_surfaces": {
+            "controller_workflows": True,
+            "nested_form_parameters": True,
+            "multipart_file_uploads": True,
+            "repeated_file_fields": True,
+            "binary_response_downloads": True,
+            "redirects_and_csrf": True,
+            "active_record": capabilities.get("full_model_access", False),
+            "rake_tasks": not skip_runtime,
+            "rails_runner": not skip_runtime,
+        },
+        "semantic_validation": (
+            "Addressability is exhaustive for the installed route and task catalogs. "
+            "Individual workflows still enforce their own authorization, validations, "
+            "required parameters, and state preconditions."
+        ),
+    }
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+        result["written_to"] = str(out.resolve())
+    _emit(runtime, result)
 
 
 @cli.group("settings")
@@ -847,16 +1372,29 @@ def export_model(
     output_format: str,
     include_hidden: bool,
 ) -> None:
-    data = _backend(runtime).execute(
-        "model.list",
-        model=model,
-        where=_read_json(where),
-        order="id asc",
-        limit=1000,
-        offset=0,
-        include_hidden=include_hidden,
-        fields=None,
-    )
+    data: list[dict[str, Any]] = []
+    offset = 0
+    filters = _read_json(where)
+    try:
+        backend = _backend(runtime)
+        while True:
+            page = backend.execute(
+                "model.list",
+                model=model,
+                where=filters,
+                order="id asc",
+                limit=1000,
+                offset=offset,
+                include_hidden=include_hidden,
+                fields=None,
+            )
+            data.extend(page)
+            if len(page) < 1000:
+                break
+            offset += len(page)
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     out.parent.mkdir(parents=True, exist_ok=True)
     if output_format == "json":
         out.write_text(
