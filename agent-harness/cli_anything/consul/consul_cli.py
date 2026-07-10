@@ -195,6 +195,10 @@ def profile_group() -> None:
 @click.option("--operator-login-path", default="/users/sign_in", show_default=True)
 @click.option("--operator-probe-path", default="/admin", show_default=True)
 @click.option(
+    "--management-login-path", default="/management/sign_in", show_default=True
+)
+@click.option("--management-probe-path", default="/management", show_default=True)
+@click.option(
     "--web-timeout", default=300.0, type=click.FloatRange(min=1.0), show_default=True
 )
 @click.option("--app-path", type=click.Path(path_type=Path))
@@ -214,6 +218,8 @@ def profile_add(
     operator_password_env: str,
     operator_login_path: str,
     operator_probe_path: str,
+    management_login_path: str,
+    management_probe_path: str,
     web_timeout: float,
     app_path: Path | None,
     container: str | None,
@@ -232,6 +238,8 @@ def profile_add(
         operator_password_env=operator_password_env,
         operator_login_path=operator_login_path,
         operator_probe_path=operator_probe_path,
+        management_login_path=management_login_path,
+        management_probe_path=management_probe_path,
         web_timeout=web_timeout,
         app_path=str(app_path.resolve()) if app_path else None,
         container=container,
@@ -465,6 +473,17 @@ def web_group() -> None:
 def web_login(runtime: Runtime, login: str | None, password: str | None) -> None:
     try:
         result = _web(runtime).authenticate(login=login, password=password)
+    except ConsulBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(runtime, result)
+
+
+@web_group.command("login-management")
+@click.pass_obj
+def web_login_management(runtime: Runtime) -> None:
+    """Establish CONSUL's separate management-console session."""
+    try:
+        result = _web(runtime).authenticate_management()
     except ConsulBackendError as exc:
         raise click.ClickException(str(exc)) from exc
     _emit(runtime, result)
@@ -745,6 +764,7 @@ def coverage_audit(
         "bridge_actions": capabilities.get("actions", []),
         "execution_surfaces": {
             "controller_workflows": True,
+            "management_sessions": True,
             "nested_form_parameters": True,
             "multipart_file_uploads": True,
             "repeated_file_fields": True,

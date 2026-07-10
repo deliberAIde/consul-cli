@@ -9,9 +9,9 @@ python -m ruff format --check cli_anything/consul
 ```
 
 The unit suite covers profile/secret behavior, CLI registration, nested Rails parameter
-encoding, HTML form and method-override inspection, Devise/CSRF requests, clean timeout
-errors, multipart files with byte preservation, route invocation, and shell-free Docker
-runtime command construction.
+encoding, HTML form and method-override inspection, Devise/CSRF requests, the separate
+management session, clean timeout errors, multipart files with byte preservation, route
+invocation, and shell-free Docker runtime command construction.
 
 ## Live parity suite
 
@@ -39,11 +39,13 @@ Each live run verifies:
 3. named admin route resolution;
 4. real Devise login and CSRF;
 5. a settings mutation through `Admin::SettingsController`;
-6. persisted value verification and guaranteed restoration;
-7. complete native Rake task discovery;
-8. optional read-only Rails runner execution.
+6. the separate management-console session;
+7. authenticated access for manager, moderator, valuator, poll officer, and SDG manager;
+8. persisted setting and role verification with guaranteed restoration;
+9. complete native Rake task discovery;
+10. optional read-only Rails runner execution.
 
 Verified results:
 
-- Munich fork: 4 passed in 267.48 seconds
-- Current upstream: 4 passed in 210.27 seconds
+- Munich fork: 5 passed in 82.15 seconds
+- Current upstream: 5 passed in 420.12 seconds

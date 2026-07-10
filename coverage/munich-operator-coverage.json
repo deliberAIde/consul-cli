@@ -176,6 +176,7 @@
   ],
   "execution_surfaces": {
     "controller_workflows": true,
+    "management_sessions": true,
     "nested_form_parameters": true,
     "multipart_file_uploads": true,
     "repeated_file_fields": true,

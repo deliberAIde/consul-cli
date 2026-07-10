@@ -12,7 +12,8 @@ consul --profile PROFILE coverage audit --scope operator --out coverage/FILE.jso
 | `upstream-operator-coverage.json` | 572/572 | 119 | 150/150 |
 
 Operator route scope includes `admin`, `management`, `moderation`, `valuation`,
-`officing`, and `sdg_management`.
+`officing`, and `sdg_management`. The controller adapter establishes both the Devise
+operator session and CONSUL's distinct management-console session.
 
 `addressable_routes == total_routes` means every route discovered from
 `Rails.application.routes` can be sent through the authenticated controller adapter.

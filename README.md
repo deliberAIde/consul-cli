@@ -26,7 +26,8 @@ The same live E2E suite passes against both local targets:
 
 Machine-readable snapshots are in `coverage/`. Both report no unmapped route or Rake
 task. Live tests authenticate through Devise, mutate a setting through the real admin
-controller, verify persistence, and restore the original value.
+controller, verify persistence, establish CONSUL's separate management session, and
+authorize all five non-admin operator roles. Temporary settings and roles are restored.
 
 ## Layout
 

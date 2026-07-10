@@ -141,6 +141,20 @@ def test_web_backend_authenticates_and_sends_csrf(monkeypatch):
                 200,
                 text='<title>Admin</title><meta name="csrf-token" content="admin-token">',
             )
+        if request.method == "GET" and request.url.path == "/management/sign_in":
+            return httpx.Response(
+                302,
+                headers={"location": "/management"},
+            )
+        if request.method == "GET" and request.url.path == "/management":
+            return httpx.Response(
+                200,
+                text=(
+                    "<title>Management</title>"
+                    '<meta name="csrf-token" content="management-token">'
+                ),
+                headers={"content-type": "text/html"},
+            )
         if request.method == "PATCH" and request.url.path == "/admin/settings/1":
             seen["csrf"] = request.headers["X-CSRF-Token"]
             seen["referer"] = request.headers["Referer"]
@@ -167,6 +181,7 @@ def test_web_backend_authenticates_and_sends_csrf(monkeypatch):
     )
 
     login = backend.authenticate()
+    management = backend.authenticate_management()
     response = backend.request(
         "PATCH",
         "/admin/settings/1",
@@ -174,12 +189,14 @@ def test_web_backend_authenticates_and_sends_csrf(monkeypatch):
     )
 
     assert login["title"] == "Admin"
+    assert management["title"] == "Management"
+    assert backend._management_authenticated is True
     assert seen["login"] == {
         "authenticity_token": ["login-token"],
         "user[email]": ["admin@example.test"],
         "user[password]": ["secret"],
     }
-    assert seen["csrf"] == "admin-token"
+    assert seen["csrf"] == "management-token"
     assert seen["referer"] == "http://consul.test/admin"
     assert seen["params"] == {"setting[value]": ["CLI"]}
     assert response["flashes"] == ["Saved"]

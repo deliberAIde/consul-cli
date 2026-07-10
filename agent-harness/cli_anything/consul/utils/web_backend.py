@@ -246,6 +246,7 @@ class ConsulWebBackend:
             verify=profile.verify_tls,
         )
         self._authenticated = False
+        self._management_authenticated = False
         self._csrf_token: str | None = None
 
     def authenticate(
@@ -298,6 +299,35 @@ class ConsulWebBackend:
         self._csrf_token = probe_document["csrf_token"]
         return self._summary(probe, document=probe_document)
 
+    def authenticate_management(self) -> dict[str, Any]:
+        if not self._authenticated:
+            self.authenticate()
+
+        response = self._authentication_request(
+            "GET",
+            self.profile.management_login_path,
+            action="open the management session",
+        )
+        self._raise_for_status(response, "open the management session")
+        content_type = response.headers.get("content-type", "")
+        document = parse_html(response.text) if "html" in content_type else None
+        final_path = response.url.path.rstrip("/") or "/"
+        login_path = self.profile.management_login_path.rstrip("/")
+        probe_path = self.profile.management_probe_path.rstrip("/")
+        in_management = final_path == probe_path or final_path.startswith(
+            f"{probe_path}/"
+        )
+        if final_path == login_path or not in_management:
+            raise ConsulBackendError(
+                "Management login failed; the operator is not authorized for "
+                f"{self.profile.management_probe_path}"
+            )
+
+        self._management_authenticated = True
+        if document and document.get("csrf_token"):
+            self._csrf_token = document["csrf_token"]
+        return self._summary(response, document=document)
+
     def request(
         self,
         method: str,
@@ -314,7 +344,15 @@ class ConsulWebBackend:
         output_path: Path | None = None,
     ) -> dict[str, Any]:
         method = method.upper()
-        if authenticate and not self._authenticated:
+        request_path = httpx.URL(path).path.rstrip("/") or "/"
+        management_path = self.profile.management_probe_path.rstrip("/")
+        requires_management = (
+            request_path == management_path
+            or request_path.startswith(f"{management_path}/")
+        )
+        if authenticate and requires_management and not self._management_authenticated:
+            self.authenticate_management()
+        elif authenticate and not self._authenticated:
             self.authenticate()
 
         request_headers = {

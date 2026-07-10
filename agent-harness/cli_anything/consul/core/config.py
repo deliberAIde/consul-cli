@@ -26,6 +26,8 @@ class Profile:
     operator_password_env: str = "CONSUL_OPERATOR_PASSWORD"
     operator_login_path: str = "/users/sign_in"
     operator_probe_path: str = "/admin"
+    management_login_path: str = "/management/sign_in"
+    management_probe_path: str = "/management"
     web_timeout: float = 300.0
     app_path: str | None = None
     container: str | None = None

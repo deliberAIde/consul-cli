@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 import pytest
 
@@ -123,6 +124,75 @@ def test_live_authenticated_controller_mutation_is_restored(profile, backend):
         web._http.close()
 
     assert backend.execute("settings.get", key="org_name")["value"] == setting["value"]
+
+
+def test_live_each_operator_role_namespace_is_authorized(profile, backend):
+    if not profile.resolved_operator_password:
+        pytest.skip("Set CONSUL_OPERATOR_PASSWORD to test real operator sessions")
+
+    users = backend.execute(
+        "model.list",
+        model="User",
+        where={"email": profile.operator_login},
+        order="id asc",
+        limit=1,
+        offset=0,
+        include_hidden=True,
+        fields=["id", "email"],
+    )
+    assert len(users) == 1
+    user_id = users[0]["id"]
+    before = set(backend.execute("role.list", user_id=user_id)[0]["roles"])
+    sdg_setting = backend.execute("settings.get", key="feature.sdg")
+    sdg_before = sdg_setting["value"]
+
+    namespaces = {
+        "manager": "/management",
+        "moderator": "/moderation",
+        "valuator": "/valuation",
+        "poll_officer": "/officing",
+        "sdg_manager": "/sdg_management",
+    }
+    assigned: list[str] = []
+    web: ConsulWebBackend | None = None
+
+    try:
+        for role in namespaces:
+            if role not in before:
+                backend.execute("role.assign", user_id=user_id, role=role)
+                assigned.append(role)
+
+        current = set(backend.execute("role.list", user_id=user_id)[0]["roles"])
+        assert set(namespaces).issubset(current)
+
+        backend.execute("settings.set", key="feature.sdg", value="true")
+
+        web = ConsulWebBackend(profile, timeout=300)
+        login = web.authenticate()
+        assert urlparse(login["url"]).path == "/admin"
+
+        for role, path in namespaces.items():
+            response = web.request("GET", path)
+            final_path = urlparse(response["url"]).path
+            assert response["status"] == 200, role
+            assert final_path.startswith(path), {
+                "role": role,
+                "requested": path,
+                "final": final_path,
+                "flashes": response.get("flashes"),
+            }
+    finally:
+        if web is not None:
+            web._http.close()
+        try:
+            for role in reversed(assigned):
+                backend.execute("role.remove", user_id=user_id, role=role)
+        finally:
+            backend.execute("settings.set", key="feature.sdg", value=sdg_before)
+
+    after = set(backend.execute("role.list", user_id=user_id)[0]["roles"])
+    assert after == before
+    assert backend.execute("settings.get", key="feature.sdg")["value"] == sdg_before
 
 
 def test_live_native_runtime_surfaces(profile):

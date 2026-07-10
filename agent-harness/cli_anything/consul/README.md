@@ -66,8 +66,13 @@ consul --profile munich-local profile set-operator admin@consul.dev `
 $env:CONSUL_OPERATOR_PASSWORD = "..."
 
 consul --profile munich-local web login
+consul --profile munich-local web login-management
 consul --profile munich-local web inspect /admin/settings
 ```
+
+`management` uses a second CONSUL session distinct from Devise. Requests under
+`/management` establish it automatically through `/management/sign_in`;
+`login-management` makes that handshake explicit.
 
 The profile default is a 300-second web timeout for cold Rails development instances.
 Set `--web-timeout` on `profile add` when a target needs a different value.
