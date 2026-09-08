@@ -1,0 +1,11 @@
+consul-cli
+Copyright 2026 deliberAIde
+
+This product includes software developed at deliberAIde (https://deliberaide.com)
+as part of the civic tech agent-bridges toolkit.
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The Rails engine in consul-admin-api/ is licensed under the GNU Affero General
+Public License v3.0 (see consul-admin-api/LICENSE), because it is loaded into and
+runs as part of the CONSUL DEMOCRACY application, which is AGPL-3.0.
