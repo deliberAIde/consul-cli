@@ -2,8 +2,8 @@
 
 ## Target software
 
-- General CONSUL DEMOCRACY: `C:/Users/lukas/dev/consuldemocracy`
-- Munich fork: `C:/Users/lukas/dev/consul-lhm-dev`
+- General CONSUL DEMOCRACY: a checkout of https://github.com/consuldemocracy/consuldemocracy
+- A municipal fork, e.g. the Munich one this CLI was first built against
 
 ## Backend decision
 

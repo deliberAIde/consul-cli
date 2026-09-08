@@ -18,7 +18,7 @@ Install and enable the sibling `consul-admin-api` gem in the target Rails app, s
 ```powershell
 consul profile add munich-local http://127.0.0.1:3010 `
   --token-env CONSUL_ADMIN_API_TOKEN `
-  --app-path C:\Users\lukas\dev\consul-lhm-dev `
+  --app-path C:\path\to\consuldemocracy `
   --container consul-lhm-app-1 --default
 
 consul instance health
